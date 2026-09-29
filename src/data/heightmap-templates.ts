@@ -148,6 +148,21 @@ const fractious = `Hill 12-15 50-80 5-95 5-95
   Add -20 30-100 0 0
   Range 6-8 40-50 5-95 10-90`;
 
+// two tall lobes joined by a narrow middle, with a notch at the top and a gulf at the bottom
+const lungs = `Hill 1 45-55 24-30 40-60
+  Hill 1 45-55 70-76 40-60
+  Hill 6-7 15-22 12-42 15-85
+  Hill 6-7 15-22 58-88 15-85
+  Range 1-2 30-40 64-86 25-75
+  Smooth 2 0 0 0
+  Trough 2-3 25-35 47-53 0-35
+  Pit 3-4 25-35 45-55 72-100
+  Hill 2 18-24 46-54 42-62
+  Pit 4-6 15-25 5-95 5-95
+  Mask 4 0 0 0
+  Multiply 0.9 land 0 0
+  Smooth 1 0 0 0`;
+
 export type HeightmapTemplate = {
   id: number;
   name: string;
@@ -169,7 +184,8 @@ export const heightmapTemplates: Record<string, HeightmapTemplate> = {
   shattered: { id: 10, name: "Shattered", template: shattered, probability: 7 },
   taklamakan: { id: 11, name: "Taklamakan", template: taklamakan, probability: 1 },
   oldWorld: { id: 12, name: "Old World", template: oldWorld, probability: 8 },
-  fractious: { id: 13, name: "Fractious", template: fractious, probability: 3 }
+  fractious: { id: 13, name: "Fractious", template: fractious, probability: 3 },
+  lungs: { id: 14, name: "Lungs", template: lungs, probability: 0 }
 };
 
 declare global {

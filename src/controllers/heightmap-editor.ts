@@ -81,20 +81,9 @@ function renderTemplateEditor(): void {
         <i>Select template: </i>
         <select id="templateSelect" style="width: 16em" data-prev="templateCustom" data-tip="Select base template">
           <option value="custom" selected>Custom</option>
-          <option value="volcano">Volcano</option>
-          <option value="highIsland">High Island</option>
-          <option value="lowIsland">Low Island</option>
-          <option value="continents">Continents</option>
-          <option value="archipelago">Archipelago</option>
-          <option value="atoll">Atoll</option>
-          <option value="mediterranean">Mediterranean</option>
-          <option value="peninsula">Peninsula</option>
-          <option value="pangea">Pangea</option>
-          <option value="isthmus">Isthmus</option>
-          <option value="shattered">Shattered</option>
-          <option value="taklamakan">Taklamakan</option>
-          <option value="oldWorld">Old World</option>
-          <option value="fractious">Fractious</option>
+          ${Object.entries(heightmapTemplates)
+            .map(([id, t]) => `<option value="${id}">${t.name}</option>`)
+            .join("")}
         </select>
       </div>
       <div id="templateTools">
@@ -165,6 +154,14 @@ function renderTemplateEditor(): void {
         >
           Seed: <input id="templateSeed" value="" type="number" min="1" max="999999999" step="1" style="width: 8em" />
         </label>
+        <span data-tip="Re-run the template automatically on every change, keeping the seed fixed">
+          <input id="templateLive" class="checkbox" type="checkbox" />
+          <label for="templateLive" class="checkbox-label">Live</label>
+        </span>
+        <span data-tip="Show draggable placement boxes for Hill, Pit, Range and Trough steps on the map">
+          <input id="templateHandles" class="checkbox" type="checkbox" checked />
+          <label for="templateHandles" class="checkbox-label">Handles</label>
+        </span>
       </div>
     </div>`;
   ensureEl("dialogs").insertAdjacentHTML("beforeend", html);
@@ -175,7 +172,8 @@ function renderTemplateEditor(): void {
     items: "> div",
     handle: ".icon-resize-vertical",
     containment: "#templateBody",
-    axis: "y"
+    axis: "y",
+    update: onTemplateChanged
   });
 
   $body.addEventListener("click", (ev: Event) => {
@@ -185,18 +183,29 @@ function renderTemplateEditor(): void {
       el.classList.add("icon-check-empty");
       (el.parentElement as HTMLElement).style.opacity = "0.5";
       $body.dataset.changed = "1";
+      onTemplateChanged();
       return;
     }
     if (el.classList.contains("icon-check-empty")) {
       el.classList.add("icon-check");
       el.classList.remove("icon-check-empty");
       (el.parentElement as HTMLElement).style.opacity = "1";
+      onTemplateChanged();
       return;
     }
     if (el.classList.contains("icon-trash-empty")) {
       (el.parentElement as HTMLElement).remove();
+      onTemplateChanged();
     }
   });
+
+  $body.addEventListener("input", onTemplateChanged);
+  $body.addEventListener("change", onTemplateChanged);
+  $body.addEventListener("mouseover", (ev: Event) => highlightHandle(stepIndexOf(ev.target as HTMLElement)));
+  $body.addEventListener("mouseleave", () => highlightHandle(-1));
+  ensureEl("templateSeed").addEventListener("input", scheduleLiveRun);
+  ensureEl("templateLive").addEventListener("change", toggleLiveMode);
+  ensureEl("templateHandles").addEventListener("change", drawTemplateHandles);
 
   ensureEl("templateEditor").addEventListener("keypress", (event: Event) => {
     if ((event as KeyboardEvent).key === "Enter") {
@@ -1499,11 +1508,196 @@ function openTemplateEditor(): void {
     position: { my: "right top", at: "right-10 top+10", of: "svg" },
     close: closeTemplateEditor
   });
+  drawTemplateHandles();
 }
 
 function closeTemplateEditor(): void {
+  if (liveTimer) clearTimeout(liveTimer);
+  removeTemplateHandles();
   $("#templateEditor").dialog("destroy");
   ensureEl("templateEditor").remove();
+}
+
+// ---- Live preview and on-map placement handles ----
+
+type HandleStepType = "Hill" | "Pit" | "Range" | "Trough";
+type TemplateHandle = { index: number; type: HandleStepType; x0: number; x1: number; y0: number; y1: number };
+
+const HANDLE_COLORS: Record<HandleStepType, string> = {
+  Hill: "#3fa34d",
+  Pit: "#2f78c4",
+  Range: "#c98a1e",
+  Trough: "#9150c0"
+};
+const LIVE_DELAY = 60;
+let liveTimer: ReturnType<typeof setTimeout> | undefined;
+
+function isLive(): boolean {
+  return findEl<HTMLInputElement>("templateLive")?.checked ?? false;
+}
+
+function onTemplateChanged(): void {
+  drawTemplateHandles();
+  scheduleLiveRun();
+}
+
+function scheduleLiveRun(): void {
+  if (!isLive()) return;
+  if (liveTimer) clearTimeout(liveTimer);
+  liveTimer = setTimeout(() => requestAnimationFrame(executeTemplate), LIVE_DELAY);
+}
+
+function toggleLiveMode(): void {
+  if (!isLive()) return;
+  const seed = ensureEl<HTMLInputElement>("templateSeed");
+  if (!seed.value) seed.value = generateSeed(); // live edits need a fixed seed or every run looks different
+  executeTemplate();
+}
+
+function getStepRows(): HTMLElement[] {
+  return Array.from(ensureEl("templateBody").querySelectorAll<HTMLElement>("#templateBody > div"));
+}
+
+function stepIndexOf(el: HTMLElement): number {
+  const row = el.closest<HTMLElement>("#templateBody > div");
+  return row ? getStepRows().indexOf(row) : -1;
+}
+
+function parsePercentRange(value: string): [number, number] {
+  const [a, b] = value.split("-").map(v => parseFloat(v));
+  const lo = Number.isFinite(a) ? a : 0;
+  const hi = Number.isFinite(b) ? b : lo;
+  return [minmax(Math.min(lo, hi), 0, 100), minmax(Math.max(lo, hi), 0, 100)];
+}
+
+function formatPercentRange(lo: number, hi: number): string {
+  const a = Math.round(minmax(Math.min(lo, hi), 0, 100));
+  const b = Math.round(minmax(Math.max(lo, hi), 0, 100));
+  return a === b ? String(a) : `${a}-${b}`;
+}
+
+function getTemplateHandles(): TemplateHandle[] {
+  const handles: TemplateHandle[] = [];
+  getStepRows().forEach((row, index) => {
+    const type = row.dataset.type as HandleStepType;
+    if (!(type in HANDLE_COLORS) || row.style.opacity === "0.5") return;
+    const x = row.querySelector<HTMLInputElement>(".templateX")?.value || "";
+    const y = row.querySelector<HTMLInputElement>(".templateY")?.value || "";
+    const [x0, x1] = parsePercentRange(x);
+    const [y0, y1] = parsePercentRange(y);
+    handles.push({ index, type, x0, x1, y0, y1 });
+  });
+  return handles;
+}
+
+function writeHandleToRow(h: TemplateHandle): void {
+  const row = getStepRows()[h.index];
+  if (!row) return;
+  row.querySelector<HTMLInputElement>(".templateX")!.value = formatPercentRange(h.x0, h.x1);
+  row.querySelector<HTMLInputElement>(".templateY")!.value = formatPercentRange(h.y0, h.y1);
+  ensureEl("templateBody").dataset.changed = "1";
+}
+
+function removeTemplateHandles(): void {
+  select("#templateHandlesLayer").remove();
+}
+
+function drawTemplateHandles(): void {
+  const show = findEl<HTMLInputElement>("templateHandles")?.checked;
+  if (!show || !document.getElementById("templateEditor")) {
+    removeTemplateHandles();
+    return;
+  }
+
+  const { width, height } = options.map.graph;
+  const toX = (p: number) => (p / 100) * width;
+  const toY = (p: number) => (p / 100) * height;
+  const minSize = Math.min(width, height) / 100;
+  const fontSize = Math.max(10, Math.min(width, height) / 45);
+
+  let layer = select<SVGGElement, unknown>("#templateHandlesLayer");
+  if (layer.empty()) layer = select("#viewbox").append("g").attr("id", "templateHandlesLayer");
+
+  const groups = layer
+    .selectAll<SVGGElement, TemplateHandle>("g.templateHandle")
+    .data(getTemplateHandles(), d => String(d.index))
+    .join(enter => {
+      const g = enter.append("g").attr("class", "templateHandle").style("cursor", "move");
+      g.append("rect").attr("class", "box");
+      g.append("text").attr("class", "label").style("pointer-events", "none");
+      g.append("circle").attr("class", "resize").style("cursor", "nwse-resize");
+      return g;
+    });
+
+  const area = (d: TemplateHandle) => (d.x1 - d.x0) * (d.y1 - d.y0);
+  groups.sort((a, b) => area(b) - area(a)); // smaller boxes on top so they stay grabbable
+
+  groups
+    .select<SVGRectElement>("rect.box")
+    .attr("x", d => toX(d.x0))
+    .attr("y", d => toY(d.y0))
+    .attr("width", d => Math.max(toX(d.x1) - toX(d.x0), minSize))
+    .attr("height", d => Math.max(toY(d.y1) - toY(d.y0), minSize))
+    .attr("fill", d => HANDLE_COLORS[d.type])
+    .attr("fill-opacity", 0.12)
+    .attr("stroke", d => HANDLE_COLORS[d.type])
+    .attr("stroke-width", 2)
+    .attr("stroke-dasharray", d => (d.type === "Pit" || d.type === "Trough" ? "6 4" : null))
+    .attr("vector-effect", "non-scaling-stroke");
+
+  groups
+    .select<SVGTextElement>("text.label")
+    .attr("x", d => toX(d.x0) + 4)
+    .attr("y", d => toY(d.y0) + fontSize)
+    .attr("font-size", fontSize)
+    .attr("font-family", "sans-serif")
+    .attr("fill", d => HANDLE_COLORS[d.type])
+    .attr("stroke", "#fff")
+    .attr("stroke-width", 3)
+    .attr("paint-order", "stroke")
+    .text(d => `${d.index + 1}. ${d.type}`);
+
+  groups
+    .select<SVGCircleElement>("circle.resize")
+    .attr("cx", d => toX(d.x0) + Math.max(toX(d.x1) - toX(d.x0), minSize))
+    .attr("cy", d => toY(d.y0) + Math.max(toY(d.y1) - toY(d.y0), minSize))
+    .attr("r", fontSize / 2.2)
+    .attr("fill", "#fff")
+    .attr("stroke", d => HANDLE_COLORS[d.type])
+    .attr("stroke-width", 2)
+    .attr("vector-effect", "non-scaling-stroke");
+
+  const toPercentX = (dx: number) => (dx / width) * 100;
+  const toPercentY = (dy: number) => (dy / height) * 100;
+
+  groups.call(
+    drag<SVGGElement, TemplateHandle>().on("drag", (event, d) => {
+      const isResize = (event.sourceEvent?.target as Element | null)?.classList?.contains("resize");
+      const dx = toPercentX(event.dx);
+      const dy = toPercentY(event.dy);
+      if (isResize) {
+        d.x1 = minmax(d.x1 + dx, d.x0, 100);
+        d.y1 = minmax(d.y1 + dy, d.y0, 100);
+      } else {
+        const w = d.x1 - d.x0;
+        const h = d.y1 - d.y0;
+        d.x0 = minmax(d.x0 + dx, 0, 100 - w);
+        d.y0 = minmax(d.y0 + dy, 0, 100 - h);
+        d.x1 = d.x0 + w;
+        d.y1 = d.y0 + h;
+      }
+      writeHandleToRow(d);
+      drawTemplateHandles();
+      scheduleLiveRun();
+    })
+  );
+}
+
+function highlightHandle(index: number): void {
+  select("#templateHandlesLayer")
+    .selectAll<SVGGElement, TemplateHandle>("g.templateHandle")
+    .select("rect.box")
+    .attr("fill-opacity", d => (d.index === index ? 0.35 : 0.12));
 }
 
 function addStepOnClick(e: Event): void {
@@ -1512,6 +1706,7 @@ function addStepOnClick(e: Event): void {
   const type = target.dataset.type!;
   ensureEl("templateBody").dataset.changed = "1";
   addStep(type);
+  onTemplateChanged();
 }
 
 function addStep(type: string, count?: string, dist?: string, arg4?: string, arg5?: string): void {
@@ -1715,6 +1910,7 @@ function changeTemplate(template: string): void {
     const elements = step.trim().split(" ");
     addStep(elements[0], elements[1], elements[2], elements[3], elements[4]);
   }
+  onTemplateChanged();
 }
 
 function executeTemplate(): void {
@@ -1758,6 +1954,7 @@ function executeTemplate(): void {
   updateStatistics();
   mockHeightmap();
   redrawDerivedViews();
+  drawTemplateHandles();
 }
 
 function downloadTemplate(): void {
@@ -1808,6 +2005,7 @@ function uploadTemplate(dataLoaded: string): void {
     }
     addStep(step[0], step[1], step[2], step[3], step[4]);
   }
+  onTemplateChanged();
 }
 
 /** Own the image-converter file input here so repeat opens cannot stack listeners on a shared element */
